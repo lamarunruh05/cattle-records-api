@@ -19,12 +19,19 @@ function json(data, status = 200) {
 }
 
 function normalizeGender(value) {
-  if (value === null || value === undefined || value === "") return null;
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
 
   const raw = String(value).trim().toLowerCase();
 
-  if (raw === "bull" || raw === "male") return "male";
-  if (raw === "heifer" || raw === "female") return "female";
+  if (raw === "bull" || raw === "male") {
+    return "male";
+  }
+
+  if (raw === "heifer" || raw === "female") {
+    return "female";
+  }
 
   return "__INVALID__";
 }
@@ -43,6 +50,10 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
+      // ================================================================
+      // CURRENT FARM
+      // ================================================================
+
       async function getFarm() {
         const farms = await sql`
           SELECT id, name, created_at
@@ -58,6 +69,7 @@ export default {
       // BASIC TESTS
       // ================================================================
 
+      // GET /
       if (pathname === "/" && request.method === "GET") {
         const farm = await getFarm();
 
@@ -68,6 +80,7 @@ export default {
         });
       }
 
+      // GET /health
       if (pathname === "/health" && request.method === "GET") {
         const farm = await getFarm();
 
@@ -87,4 +100,29 @@ export default {
         const farm = await getFarm();
 
         if (!farm) {
-          return json({
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
+          );
+        }
+
+        const owners = await sql`
+          SELECT
+            id,
+            farm_id,
+            name,
+            created_at
+          FROM owners
+          WHERE farm_id = ${farm.id}
+          ORDER BY LOWER(name), name
+        `;
+
+        return json({
+          ok: true,
+          count: owners.length,
+          owners,
+        });
+     
