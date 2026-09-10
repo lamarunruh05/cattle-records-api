@@ -619,6 +619,25 @@ if (pathname === "/auth-test" && request.method === "GET") {
           body.owner_id && String(body.owner_id).trim()
             ? String(body.owner_id).trim()
             : null;
+        if (ownerId) {
+  const owner = await sql`
+    SELECT id
+    FROM owners
+    WHERE id = ${ownerId}
+      AND farm_id = ${farm.id}
+    LIMIT 1
+  `;
+
+  if (!owner.length) {
+    return json(
+      {
+        ok: false,
+        error: "Owner not found",
+      },
+      404
+    );
+  }
+}
 
         const notes =
           body.notes && String(body.notes).trim()
@@ -769,7 +788,25 @@ if (pathname === "/auth-test" && request.method === "GET") {
               ? String(body.owner_id).trim()
               : null;
         }
+if (ownerId) {
+  const owner = await sql`
+    SELECT id
+    FROM owners
+    WHERE id = ${ownerId}
+      AND farm_id = ${farm.id}
+    LIMIT 1
+  `;
 
+  if (!owner.length) {
+    return json(
+      {
+        ok: false,
+        error: "Owner not found",
+      },
+      404
+    );
+  }
+}
         let notes = current.notes;
 
         if (body.notes !== undefined) {
