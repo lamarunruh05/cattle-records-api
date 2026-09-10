@@ -738,22 +738,14 @@ export default {
       // ================================================================
 
       // --------------------------------
-      // GET /api/calves?cow_id=UUID
+            // --------------------------------
+      // GET /api/calves
+      // Optional: ?cow_id=UUID
       // --------------------------------
       if (pathname === "/api/calves" && request.method === "GET") {
         const cowId = String(
           url.searchParams.get("cow_id") || ""
         ).trim();
-
-        if (!cowId) {
-          return json(
-            {
-              ok: false,
-              error: "cow_id is required",
-            },
-            400
-          );
-        }
 
         const farm = await getFarm();
 
@@ -767,43 +759,81 @@ export default {
           );
         }
 
-        const cow = await sql`
-          SELECT id
-          FROM cows
-          WHERE id = ${cowId}
-            AND farm_id = ${farm.id}
-          LIMIT 1
-        `;
+        // ------------------------------------------------
+        // If cow_id was supplied, return that cow's calves
+        // ------------------------------------------------
+        if (cowId) {
+          const cow = await sql`
+            SELECT id
+            FROM cows
+            WHERE id = ${cowId}
+              AND farm_id = ${farm.id}
+            LIMIT 1
+          `;
 
-        if (!cow.length) {
-          return json(
-            {
-              ok: false,
-              error: "Cow not found",
-            },
-            404
-          );
+          if (!cow.length) {
+            return json(
+              {
+                ok: false,
+                error: "Cow not found",
+              },
+              404
+            );
+          }
+
+          const calves = await sql`
+            SELECT
+              id,
+              cow_id,
+              birth_month,
+              birth_year,
+              gender,
+              color,
+              is_dead,
+              notes,
+              created_by,
+              created_at,
+              updated_at
+            FROM calves
+            WHERE cow_id = ${cowId}
+            ORDER BY
+              birth_year DESC,
+              birth_month DESC,
+              created_at DESC
+          `;
+
+          return json({
+            ok: true,
+            count: calves.length,
+            calves,
+          });
         }
 
+        // ------------------------------------------------
+        // No cow_id supplied:
+        // return ALL calves belonging to this farm
+        // ------------------------------------------------
         const calves = await sql`
           SELECT
-            id,
-            cow_id,
-            birth_month,
-            birth_year,
-            gender,
-            color,
-            is_dead,
-            notes,
-            created_by,
-            created_at,
-            updated_at
+            calves.id,
+            calves.cow_id,
+            calves.birth_month,
+            calves.birth_year,
+            calves.gender,
+            calves.color,
+            calves.is_dead,
+            calves.notes,
+            calves.created_by,
+            calves.created_at,
+            calves.updated_at
           FROM calves
-          WHERE cow_id = ${cowId}
+          INNER JOIN cows
+            ON cows.id = calves.cow_id
+          WHERE cows.farm_id = ${farm.id}
           ORDER BY
-            birth_year DESC,
-            birth_month DESC,
-            created_at DESC
+            calves.birth_year DESC,
+            calves.birth_month DESC,
+            calves.created_at DESC
         `;
 
         return json({
