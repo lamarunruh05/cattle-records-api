@@ -83,7 +83,45 @@ export default {
       const sql = neon(env.DATABASE_URL);
       const url = new URL(request.url);
       const pathname = url.pathname;
+let authContext = null;
 
+if (pathname.startsWith("/api/")) {
+  const auth = await verifyAuth(request);
+
+  if (!auth?.sub) {
+    return json(
+      {
+        ok: false,
+        error: "Not authenticated",
+      },
+      401
+    );
+  }
+
+  const membership = await getFarmForUser(String(auth.sub));
+
+  if (!membership) {
+    return json(
+      {
+        ok: false,
+        error: "No farm access",
+      },
+      403
+    );
+  }
+
+  authContext = {
+    userId: String(auth.sub),
+    farmId: membership.farm_id,
+    displayName:
+      membership.display_name ||
+      auth.name ||
+      auth.email ||
+      "User",
+    role: membership.role,
+    farmName: membership.farm_name,
+  };
+}
       // --------------------------------
       // Find the current farm
       // --------------------------------
