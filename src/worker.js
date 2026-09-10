@@ -1,15 +1,39 @@
 import { neon } from "@neondatabase/serverless";
 
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  };
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      ...corsHeaders(),
     },
   });
+}
+
+function normalizeGender(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const raw = String(value).trim().toLowerCase();
+
+  if (raw === "bull" || raw === "male") {
+    return "male";
+  }
+
+  if (raw === "heifer" || raw === "female") {
+    return "female";
+  }
+
+  return "__INVALID__";
 }
 
 export default {
@@ -17,20 +41,19 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        },
+        headers: corsHeaders(),
       });
     }
 
     try {
       const sql = neon(env.DATABASE_URL);
       const url = new URL(request.url);
+      const pathname = url.pathname;
 
-      // GET /
-      if (url.pathname === "/" && request.method === "GET") {
+      // --------------------------------
+      // Find the current farm
+      // --------------------------------
+      async function getFarm() {
         const farms = await sql`
           SELECT id, name, created_at
           FROM farms
@@ -38,39 +61,46 @@ export default {
           LIMIT 1
         `;
 
+        return farms[0] || null;
+      }
+
+      // --------------------------------
+      // GET /
+      // --------------------------------
+      if (pathname === "/" && request.method === "GET") {
+        const farm = await getFarm();
+
         return json({
           ok: true,
           message: "Cattle Records API connected to Neon",
-          farm: farms[0] || null,
+          farm,
         });
       }
 
+      // --------------------------------
       // GET /health
-      if (url.pathname === "/health" && request.method === "GET") {
-        const farms = await sql`
-          SELECT id, name
-          FROM farms
-          ORDER BY created_at ASC
-          LIMIT 1
-        `;
+      // --------------------------------
+      if (pathname === "/health" && request.method === "GET") {
+        const farm = await getFarm();
 
         return json({
           ok: true,
           database: "connected",
-          farm: farms[0] || null,
+          farm,
         });
       }
 
-      // GET /api/cows
-      if (url.pathname === "/api/cows" && request.method === "GET") {
-        const farms = await sql`
-          SELECT id
-          FROM farms
-          ORDER BY created_at ASC
-          LIMIT 1
-        `;
+      // ================================================================
+      // COWS
+      // ================================================================
 
-        if (!farms.length) {
+      // --------------------------------
+      // GET /api/cows
+      // --------------------------------
+      if (pathname === "/api/cows" && request.method === "GET") {
+        const farm = await getFarm();
+
+        if (!farm) {
           return json(
             {
               ok: false,
@@ -79,8 +109,6 @@ export default {
             404
           );
         }
-
-        const farmId = farms[0].id;
 
         const cows = await sql`
           SELECT
@@ -93,7 +121,7 @@ export default {
             created_at,
             updated_at
           FROM cows
-          WHERE farm_id = ${farmId}
+          WHERE farm_id = ${farm.id}
           ORDER BY
             CASE
               WHEN brand_number ~ '^[0-9]+$'
@@ -110,8 +138,10 @@ export default {
         });
       }
 
+      // --------------------------------
       // POST /api/cows
-      if (url.pathname === "/api/cows" && request.method === "POST") {
+      // --------------------------------
+      if (pathname === "/api/cows" && request.method === "POST") {
         let body;
 
         try {
@@ -123,6 +153,18 @@ export default {
               error: "Invalid JSON body",
             },
             400
+          );
+        }
+
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
           );
         }
 
@@ -138,29 +180,10 @@ export default {
           );
         }
 
-        const farms = await sql`
-          SELECT id
-          FROM farms
-          ORDER BY created_at ASC
-          LIMIT 1
-        `;
-
-        if (!farms.length) {
-          return json(
-            {
-              ok: false,
-              error: "No farm found",
-            },
-            404
-          );
-        }
-
-        const farmId = farms[0].id;
-
         const existing = await sql`
           SELECT id
           FROM cows
-          WHERE farm_id = ${farmId}
+          WHERE farm_id = ${farm.id}
             AND brand_number = ${brandNumber}
           LIMIT 1
         `;
@@ -174,9 +197,6 @@ export default {
             409
           );
         }
-
-        const cowId = crypto.randomUUID();
-        const now = new Date().toISOString();
 
         const ownerId =
           body.owner_id && String(body.owner_id).trim()
@@ -193,6 +213,9 @@ export default {
             ? String(body.created_by).trim()
             : null;
 
+        const cowId = crypto.randomUUID();
+        const now = new Date().toISOString();
+
         const inserted = await sql`
           INSERT INTO cows (
             id,
@@ -206,7 +229,7 @@ export default {
           )
           VALUES (
             ${cowId},
-            ${farmId},
+            ${farm.id},
             ${brandNumber},
             ${ownerId},
             ${notes},
@@ -234,8 +257,192 @@ export default {
         );
       }
 
+      // --------------------------------
+      // Match /api/cows/:id
+      // --------------------------------
+      const cowMatch = pathname.match(/^\/api\/cows\/([^/]+)$/);
+
+      // --------------------------------
+      // PUT /api/cows/:id
+      // --------------------------------
+      if (cowMatch && request.method === "PUT") {
+        const cowId = decodeURIComponent(cowMatch[1]);
+
+        let body;
+
+        try {
+          body = await request.json();
+        } catch {
+          return json(
+            {
+              ok: false,
+              error: "Invalid JSON body",
+            },
+            400
+          );
+        }
+
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
+          );
+        }
+
+        const existingCow = await sql`
+          SELECT *
+          FROM cows
+          WHERE id = ${cowId}
+            AND farm_id = ${farm.id}
+          LIMIT 1
+        `;
+
+        if (!existingCow.length) {
+          return json(
+            {
+              ok: false,
+              error: "Cow not found",
+            },
+            404
+          );
+        }
+
+        const current = existingCow[0];
+
+        const brandNumber =
+          body.brand_number !== undefined
+            ? String(body.brand_number).trim()
+            : current.brand_number;
+
+        if (!brandNumber) {
+          return json(
+            {
+              ok: false,
+              error: "brand_number is required",
+            },
+            400
+          );
+        }
+
+        const duplicate = await sql`
+          SELECT id
+          FROM cows
+          WHERE farm_id = ${farm.id}
+            AND brand_number = ${brandNumber}
+            AND id <> ${cowId}
+          LIMIT 1
+        `;
+
+        if (duplicate.length) {
+          return json(
+            {
+              ok: false,
+              error: "A cow with that brand number already exists",
+            },
+            409
+          );
+        }
+
+        let ownerId = current.owner_id;
+
+        if (body.owner_id !== undefined) {
+          ownerId =
+            body.owner_id && String(body.owner_id).trim()
+              ? String(body.owner_id).trim()
+              : null;
+        }
+
+        let notes = current.notes;
+
+        if (body.notes !== undefined) {
+          notes =
+            body.notes && String(body.notes).trim()
+              ? String(body.notes).trim()
+              : null;
+        }
+
+        const now = new Date().toISOString();
+
+        const updated = await sql`
+          UPDATE cows
+          SET
+            brand_number = ${brandNumber},
+            owner_id = ${ownerId},
+            notes = ${notes},
+            updated_at = ${now}
+          WHERE id = ${cowId}
+            AND farm_id = ${farm.id}
+          RETURNING
+            id,
+            farm_id,
+            brand_number,
+            owner_id,
+            notes,
+            created_by,
+            created_at,
+            updated_at
+        `;
+
+        return json({
+          ok: true,
+          cow: updated[0],
+        });
+      }
+
+      // --------------------------------
+      // DELETE /api/cows/:id
+      // --------------------------------
+      if (cowMatch && request.method === "DELETE") {
+        const cowId = decodeURIComponent(cowMatch[1]);
+
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
+          );
+        }
+
+        const deleted = await sql`
+          DELETE FROM cows
+          WHERE id = ${cowId}
+            AND farm_id = ${farm.id}
+          RETURNING id, brand_number
+        `;
+
+        if (!deleted.length) {
+          return json(
+            {
+              ok: false,
+              error: "Cow not found",
+            },
+            404
+          );
+        }
+
+        return json({
+          ok: true,
+          deleted: deleted[0],
+        });
+      }
+
+      // ================================================================
+      // CALVES
+      // ================================================================
+
+      // --------------------------------
       // GET /api/calves?cow_id=UUID
-      if (url.pathname === "/api/calves" && request.method === "GET") {
+      // --------------------------------
+      if (pathname === "/api/calves" && request.method === "GET") {
         const cowId = String(
           url.searchParams.get("cow_id") || ""
         ).trim();
@@ -247,6 +454,36 @@ export default {
               error: "cow_id is required",
             },
             400
+          );
+        }
+
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
+          );
+        }
+
+        const cow = await sql`
+          SELECT id
+          FROM cows
+          WHERE id = ${cowId}
+            AND farm_id = ${farm.id}
+          LIMIT 1
+        `;
+
+        if (!cow.length) {
+          return json(
+            {
+              ok: false,
+              error: "Cow not found",
+            },
+            404
           );
         }
 
@@ -278,8 +515,10 @@ export default {
         });
       }
 
+      // --------------------------------
       // POST /api/calves
-      if (url.pathname === "/api/calves" && request.method === "POST") {
+      // --------------------------------
+      if (pathname === "/api/calves" && request.method === "POST") {
         let body;
 
         try {
@@ -315,160 +554,4 @@ export default {
         ) {
           return json(
             {
-              ok: false,
-              error: "birth_month must be between 1 and 12",
-            },
-            400
-          );
-        }
-
-        if (
-          !Number.isInteger(birthYear) ||
-          birthYear < 1900 ||
-          birthYear > 2200
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "birth_year is invalid",
-            },
-            400
-          );
-        }
-
-        const cow = await sql`
-          SELECT id
-          FROM cows
-          WHERE id = ${cowId}
-          LIMIT 1
-        `;
-
-        if (!cow.length) {
-          return json(
-            {
-              ok: false,
-              error: "Cow not found",
-            },
-            404
-          );
-        }
-
-        const calfId = crypto.randomUUID();
-        const now = new Date().toISOString();
-
-        // App may send Bull/Heifer.
-        // Neon stores male/female.
-        const rawGender =
-          body.gender && String(body.gender).trim()
-            ? String(body.gender).trim().toLowerCase()
-            : null;
-
-        let gender = null;
-
-        if (rawGender === "bull" || rawGender === "male") {
-          gender = "male";
-        } else if (
-          rawGender === "heifer" ||
-          rawGender === "female"
-        ) {
-          gender = "female";
-        } else if (rawGender) {
-          return json(
-            {
-              ok: false,
-              error:
-                "gender must be Bull, Heifer, male, or female",
-            },
-            400
-          );
-        }
-
-        const color =
-          body.color && String(body.color).trim()
-            ? String(body.color).trim()
-            : null;
-
-        const notes =
-          body.notes && String(body.notes).trim()
-            ? String(body.notes).trim()
-            : null;
-
-        const createdBy =
-          body.created_by && String(body.created_by).trim()
-            ? String(body.created_by).trim()
-            : null;
-
-        const isDead = Boolean(body.is_dead);
-
-        const inserted = await sql`
-          INSERT INTO calves (
-            id,
-            cow_id,
-            birth_month,
-            birth_year,
-            gender,
-            color,
-            is_dead,
-            notes,
-            created_by,
-            created_at,
-            updated_at
-          )
-          VALUES (
-            ${calfId},
-            ${cowId},
-            ${birthMonth},
-            ${birthYear},
-            ${gender},
-            ${color},
-            ${isDead},
-            ${notes},
-            ${createdBy},
-            ${now},
-            ${now}
-          )
-          RETURNING
-            id,
-            cow_id,
-            birth_month,
-            birth_year,
-            gender,
-            color,
-            is_dead,
-            notes,
-            created_by,
-            created_at,
-            updated_at
-        `;
-
-        return json(
-          {
-            ok: true,
-            calf: inserted[0],
-          },
-          201
-        );
-      }
-
-      // 404
-      return json(
-        {
-          ok: false,
-          error: "Not found",
-        },
-        404
-      );
-    } catch (error) {
-      console.error(error);
-
-      return json(
-        {
-          ok: false,
-          error: "Internal server error",
-          message: error?.message || "Unknown error",
-        },
-        500
-      );
-    }
-  },
-};
+              ok: false
