@@ -1,4 +1,4 @@
-import { neon }import { neon } from "@neondatabase/serverless";
+import { neon } from "@neondatabase/serverless";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const NEON_AUTH_URL =
