@@ -104,7 +104,7 @@ export default {
 
   return memberships[0] || null;
 }
-      }
+      
 // --------------------------------
 // GET /auth-test
 // --------------------------------
