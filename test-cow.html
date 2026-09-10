@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Add Test Cow</title>
+</head>
+<body>
+  <button id="addCow">Add Cow 101</button>
+  <pre id="result"></pre>
+
+  <script>
+    document.getElementById("addCow").onclick = async () => {
+      const response = await fetch(
+        "https://cattle-records-api.lamarunruh0.workers.dev/api/cows",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            brand_number: "101",
+            notes: "Test cow"
+          })
+        }
+      );
+
+      const data = await response.json();
+      document.getElementById("result").textContent =
+        JSON.stringify(data, null, 2);
+    };
+  </script>
+</body>
+</html>
