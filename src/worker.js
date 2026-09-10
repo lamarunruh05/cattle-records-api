@@ -83,6 +83,12 @@ export default {
       const sql = neon(env.DATABASE_URL);
       const url = new URL(request.url);
       const pathname = url.pathname;
+      if (request.method === "OPTIONS") {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(),
+  });
+      }
 let authContext = null;
 
 if (pathname.startsWith("/api/")) {
