@@ -149,6 +149,17 @@ if (pathname.startsWith("/api/")) {
   return memberships[0] || null;
 }
       
+      async function getFarm() {
+  if (!authContext?.farmId) {
+    return null;
+  }
+
+  return {
+    id: authContext.farmId,
+    name: authContext.farmName,
+  };
+      }
+      
 // --------------------------------
 // GET /auth-test
 // --------------------------------
