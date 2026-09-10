@@ -2,5 +2,11 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cattle-records-api",
   "main": "src/worker.js",
-  "compatibility_date": "2026-09-09"
+  "compatibility_date": "2026-09-09",
+  "r2_buckets": [
+    {
+      "binding": "PHOTOS",
+      "bucket_name": "cattle-records-photos"
+    }
+  ]
 }
