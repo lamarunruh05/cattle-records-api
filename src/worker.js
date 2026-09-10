@@ -625,10 +625,7 @@ if (pathname === "/auth-test" && request.method === "GET") {
             ? String(body.notes).trim()
             : null;
 
-        const createdBy =
-          body.created_by && String(body.created_by).trim()
-            ? String(body.created_by).trim()
-            : null;
+       const createdBy = authContext.displayName; 
 
         const cowId = crypto.randomUUID();
         const now = new Date().toISOString();
@@ -1073,10 +1070,7 @@ if (pathname === "/auth-test" && request.method === "GET") {
             ? String(body.notes).trim()
             : null;
 
-        const createdBy =
-          body.created_by && String(body.created_by).trim()
-            ? String(body.created_by).trim()
-            : null;
+        const createdBy = authContext.displayName;
 
         const isDead = Boolean(body.is_dead);
 
