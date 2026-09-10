@@ -87,15 +87,23 @@ export default {
       // --------------------------------
       // Find the current farm
       // --------------------------------
-      async function getFarm() {
-        const farms = await sql`
-          SELECT id, name, created_at
-          FROM farms
-          ORDER BY created_at ASC
-          LIMIT 1
-        `;
+      async function getFarmForUser(authUserId) {
+  const memberships = await sql`
+    SELECT
+      fm.farm_id,
+      fm.auth_user_id,
+      fm.display_name,
+      fm.role,
+      f.name AS farm_name
+    FROM farm_members fm
+    JOIN farms f
+      ON f.id = fm.farm_id
+    WHERE fm.auth_user_id = ${authUserId}
+    LIMIT 1
+  `;
 
-        return farms[0] || null;
+  return memberships[0] || null;
+}
       }
 // --------------------------------
 // GET /auth-test
