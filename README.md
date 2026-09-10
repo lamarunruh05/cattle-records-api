@@ -13,3 +13,4 @@ Both test the Neon connection and return the farm record.
 
 For Cloudflare Git integration, use:
 - Deploy command: `npx wrangler deploy`
+API deployment enabled
