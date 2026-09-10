@@ -71,7 +71,13 @@ export default {
         `;
 
         if (!farms.length) {
-          return json({ ok: false, error: "No farm found" }, 404);
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
+          );
         }
 
         const farmId = farms[0].id;
@@ -111,13 +117,25 @@ export default {
         try {
           body = await request.json();
         } catch {
-          return json({ ok: false, error: "Invalid JSON body" }, 400);
+          return json(
+            {
+              ok: false,
+              error: "Invalid JSON body",
+            },
+            400
+          );
         }
 
         const brandNumber = String(body.brand_number || "").trim();
 
         if (!brandNumber) {
-          return json({ ok: false, error: "brand_number is required" }, 400);
+          return json(
+            {
+              ok: false,
+              error: "brand_number is required",
+            },
+            400
+          );
         }
 
         const farms = await sql`
@@ -128,7 +146,13 @@ export default {
         `;
 
         if (!farms.length) {
-          return json({ ok: false, error: "No farm found" }, 404);
+          return json(
+            {
+              ok: false,
+              error: "No farm found",
+            },
+            404
+          );
         }
 
         const farmId = farms[0].id;
@@ -190,7 +214,15 @@ export default {
             ${now},
             ${now}
           )
-          RETURNING *
+          RETURNING
+            id,
+            farm_id,
+            brand_number,
+            owner_id,
+            notes,
+            created_by,
+            created_at,
+            updated_at
         `;
 
         return json(
@@ -204,10 +236,18 @@ export default {
 
       // GET /api/calves?cow_id=UUID
       if (url.pathname === "/api/calves" && request.method === "GET") {
-        const cowId = String(url.searchParams.get("cow_id") || "").trim();
+        const cowId = String(
+          url.searchParams.get("cow_id") || ""
+        ).trim();
 
         if (!cowId) {
-          return json({ ok: false, error: "cow_id is required" }, 400);
+          return json(
+            {
+              ok: false,
+              error: "cow_id is required",
+            },
+            400
+          );
         }
 
         const calves = await sql`
@@ -225,7 +265,10 @@ export default {
             updated_at
           FROM calves
           WHERE cow_id = ${cowId}
-          ORDER BY birth_year DESC, birth_month DESC, created_at DESC
+          ORDER BY
+            birth_year DESC,
+            birth_month DESC,
+            created_at DESC
         `;
 
         return json({
@@ -242,7 +285,13 @@ export default {
         try {
           body = await request.json();
         } catch {
-          return json({ ok: false, error: "Invalid JSON body" }, 400);
+          return json(
+            {
+              ok: false,
+              error: "Invalid JSON body",
+            },
+            400
+          );
         }
 
         const cowId = String(body.cow_id || "").trim();
@@ -250,7 +299,13 @@ export default {
         const birthYear = Number(body.birth_year);
 
         if (!cowId) {
-          return json({ ok: false, error: "cow_id is required" }, 400);
+          return json(
+            {
+              ok: false,
+              error: "cow_id is required",
+            },
+            400
+          );
         }
 
         if (
@@ -259,14 +314,24 @@ export default {
           birthMonth > 12
         ) {
           return json(
-            { ok: false, error: "birth_month must be between 1 and 12" },
+            {
+              ok: false,
+              error: "birth_month must be between 1 and 12",
+            },
             400
           );
         }
 
-        if (!Number.isInteger(birthYear) || birthYear < 1900) {
+        if (
+          !Number.isInteger(birthYear) ||
+          birthYear < 1900 ||
+          birthYear > 2200
+        ) {
           return json(
-            { ok: false, error: "birth_year is invalid" },
+            {
+              ok: false,
+              error: "birth_year is invalid",
+            },
             400
           );
         }
@@ -279,16 +344,44 @@ export default {
         `;
 
         if (!cow.length) {
-          return json({ ok: false, error: "Cow not found" }, 404);
+          return json(
+            {
+              ok: false,
+              error: "Cow not found",
+            },
+            404
+          );
         }
 
         const calfId = crypto.randomUUID();
         const now = new Date().toISOString();
 
-        const gender =
+        // App may send Bull/Heifer.
+        // Neon stores male/female.
+        const rawGender =
           body.gender && String(body.gender).trim()
-            ? String(body.gender).trim()
+            ? String(body.gender).trim().toLowerCase()
             : null;
+
+        let gender = null;
+
+        if (rawGender === "bull" || rawGender === "male") {
+          gender = "male";
+        } else if (
+          rawGender === "heifer" ||
+          rawGender === "female"
+        ) {
+          gender = "female";
+        } else if (rawGender) {
+          return json(
+            {
+              ok: false,
+              error:
+                "gender must be Bull, Heifer, male, or female",
+            },
+            400
+          );
+        }
 
         const color =
           body.color && String(body.color).trim()
@@ -334,7 +427,18 @@ export default {
             ${now},
             ${now}
           )
-          RETURNING *
+          RETURNING
+            id,
+            cow_id,
+            birth_month,
+            birth_year,
+            gender,
+            color,
+            is_dead,
+            notes,
+            created_by,
+            created_at,
+            updated_at
         `;
 
         return json(
@@ -346,6 +450,7 @@ export default {
         );
       }
 
+      // 404
       return json(
         {
           ok: false,
