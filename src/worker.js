@@ -29,10 +29,7 @@ export default {
       const sql = neon(env.DATABASE_URL);
       const url = new URL(request.url);
 
-      // --------------------------------
       // GET /
-      // Basic API / Neon connection test
-      // --------------------------------
       if (url.pathname === "/" && request.method === "GET") {
         const farms = await sql`
           SELECT id, name, created_at
@@ -48,9 +45,7 @@ export default {
         });
       }
 
-      // --------------------------------
       // GET /health
-      // --------------------------------
       if (url.pathname === "/health" && request.method === "GET") {
         const farms = await sql`
           SELECT id, name
@@ -66,10 +61,7 @@ export default {
         });
       }
 
-      // --------------------------------
       // GET /api/cows
-      // Return all cows for the farm
-      // --------------------------------
       if (url.pathname === "/api/cows" && request.method === "GET") {
         const farms = await sql`
           SELECT id
@@ -79,13 +71,7 @@ export default {
         `;
 
         if (!farms.length) {
-          return json(
-            {
-              ok: false,
-              error: "No farm found",
-            },
-            404
-          );
+          return json({ ok: false, error: "No farm found" }, 404);
         }
 
         const farmId = farms[0].id;
@@ -118,35 +104,20 @@ export default {
         });
       }
 
-      // --------------------------------
       // POST /api/cows
-      // Add a new cow
-      // --------------------------------
       if (url.pathname === "/api/cows" && request.method === "POST") {
         let body;
 
         try {
           body = await request.json();
         } catch {
-          return json(
-            {
-              ok: false,
-              error: "Invalid JSON body",
-            },
-            400
-          );
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
         }
 
         const brandNumber = String(body.brand_number || "").trim();
 
         if (!brandNumber) {
-          return json(
-            {
-              ok: false,
-              error: "brand_number is required",
-            },
-            400
-          );
+          return json({ ok: false, error: "brand_number is required" }, 400);
         }
 
         const farms = await sql`
@@ -157,13 +128,7 @@ export default {
         `;
 
         if (!farms.length) {
-          return json(
-            {
-              ok: false,
-              error: "No farm found",
-            },
-            404
-          );
+          return json({ ok: false, error: "No farm found" }, 404);
         }
 
         const farmId = farms[0].id;
@@ -225,15 +190,7 @@ export default {
             ${now},
             ${now}
           )
-          RETURNING
-            id,
-            farm_id,
-            brand_number,
-            owner_id,
-            notes,
-            created_by,
-            created_at,
-            updated_at
+          RETURNING *
         `;
 
         return json(
@@ -245,9 +202,150 @@ export default {
         );
       }
 
-      // --------------------------------
-      // 404
-      // --------------------------------
+      // GET /api/calves?cow_id=UUID
+      if (url.pathname === "/api/calves" && request.method === "GET") {
+        const cowId = String(url.searchParams.get("cow_id") || "").trim();
+
+        if (!cowId) {
+          return json({ ok: false, error: "cow_id is required" }, 400);
+        }
+
+        const calves = await sql`
+          SELECT
+            id,
+            cow_id,
+            birth_month,
+            birth_year,
+            gender,
+            color,
+            is_dead,
+            notes,
+            created_by,
+            created_at,
+            updated_at
+          FROM calves
+          WHERE cow_id = ${cowId}
+          ORDER BY birth_year DESC, birth_month DESC, created_at DESC
+        `;
+
+        return json({
+          ok: true,
+          count: calves.length,
+          calves,
+        });
+      }
+
+      // POST /api/calves
+      if (url.pathname === "/api/calves" && request.method === "POST") {
+        let body;
+
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        const cowId = String(body.cow_id || "").trim();
+        const birthMonth = Number(body.birth_month);
+        const birthYear = Number(body.birth_year);
+
+        if (!cowId) {
+          return json({ ok: false, error: "cow_id is required" }, 400);
+        }
+
+        if (
+          !Number.isInteger(birthMonth) ||
+          birthMonth < 1 ||
+          birthMonth > 12
+        ) {
+          return json(
+            { ok: false, error: "birth_month must be between 1 and 12" },
+            400
+          );
+        }
+
+        if (!Number.isInteger(birthYear) || birthYear < 1900) {
+          return json(
+            { ok: false, error: "birth_year is invalid" },
+            400
+          );
+        }
+
+        const cow = await sql`
+          SELECT id
+          FROM cows
+          WHERE id = ${cowId}
+          LIMIT 1
+        `;
+
+        if (!cow.length) {
+          return json({ ok: false, error: "Cow not found" }, 404);
+        }
+
+        const calfId = crypto.randomUUID();
+        const now = new Date().toISOString();
+
+        const gender =
+          body.gender && String(body.gender).trim()
+            ? String(body.gender).trim()
+            : null;
+
+        const color =
+          body.color && String(body.color).trim()
+            ? String(body.color).trim()
+            : null;
+
+        const notes =
+          body.notes && String(body.notes).trim()
+            ? String(body.notes).trim()
+            : null;
+
+        const createdBy =
+          body.created_by && String(body.created_by).trim()
+            ? String(body.created_by).trim()
+            : null;
+
+        const isDead = Boolean(body.is_dead);
+
+        const inserted = await sql`
+          INSERT INTO calves (
+            id,
+            cow_id,
+            birth_month,
+            birth_year,
+            gender,
+            color,
+            is_dead,
+            notes,
+            created_by,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            ${calfId},
+            ${cowId},
+            ${birthMonth},
+            ${birthYear},
+            ${gender},
+            ${color},
+            ${isDead},
+            ${notes},
+            ${createdBy},
+            ${now},
+            ${now}
+          )
+          RETURNING *
+        `;
+
+        return json(
+          {
+            ok: true,
+            calf: inserted[0],
+          },
+          201
+        );
+      }
+
       return json(
         {
           ok: false,
