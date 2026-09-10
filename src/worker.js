@@ -1381,6 +1381,135 @@ if (ownerId) {
         });
       }
 
+      // ================================================================
+      // FARM CHAT
+      // ================================================================
+
+      // --------------------------------
+      // GET /api/messages
+      // --------------------------------
+      if (pathname === "/api/messages" && request.method === "GET") {
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json({ ok: false, error: "No farm found" }, 404);
+        }
+
+        const messages = await sql`
+          SELECT
+            id,
+            auth_user_id,
+            display_name,
+            message_text,
+            photo_url,
+            created_at
+          FROM farm_messages
+          WHERE farm_id = ${farm.id}
+          ORDER BY created_at ASC, id ASC
+        `;
+
+        return json({ ok: true, messages });
+      }
+
+      // --------------------------------
+      // POST /api/messages
+      // Text messages only for now.
+      // Shared photo storage will be added separately.
+      // --------------------------------
+      if (pathname === "/api/messages" && request.method === "POST") {
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json({ ok: false, error: "No farm found" }, 404);
+        }
+
+        const body = await request.json();
+        const messageText =
+          body.message_text === null || body.message_text === undefined
+            ? ""
+            : String(body.message_text).trim();
+
+        if (!messageText) {
+          return json({ ok: false, error: "Message is required" }, 400);
+        }
+
+        // Keep accidental/abusive oversized requests out of the database.
+        if (messageText.length > 5000) {
+          return json({ ok: false, error: "Message is too long" }, 400);
+        }
+
+        const inserted = await sql`
+          INSERT INTO farm_messages (
+            farm_id,
+            auth_user_id,
+            display_name,
+            message_text,
+            photo_url
+          )
+          VALUES (
+            ${farm.id},
+            ${authContext.userId},
+            ${authContext.displayName},
+            ${messageText},
+            ${null}
+          )
+          RETURNING
+            id,
+            auth_user_id,
+            display_name,
+            message_text,
+            photo_url,
+            created_at
+        `;
+
+        return json({ ok: true, message: inserted[0] }, 201);
+      }
+
+      // Match /api/messages/:id
+      const messageMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
+
+      // --------------------------------
+      // DELETE /api/messages/:id
+      // Sender can delete their own message; farm admin can delete any.
+      // --------------------------------
+      if (messageMatch && request.method === "DELETE") {
+        const messageId = decodeURIComponent(messageMatch[1]);
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json({ ok: false, error: "No farm found" }, 404);
+        }
+
+        const existing = await sql`
+          SELECT id, auth_user_id
+          FROM farm_messages
+          WHERE id = ${messageId}
+            AND farm_id = ${farm.id}
+          LIMIT 1
+        `;
+
+        if (!existing.length) {
+          return json({ ok: false, error: "Message not found" }, 404);
+        }
+
+        const isSender =
+          String(existing[0].auth_user_id) === String(authContext.userId);
+        const isAdmin = authContext.role === "admin";
+
+        if (!isSender && !isAdmin) {
+          return json({ ok: false, error: "Not allowed to delete this message" }, 403);
+        }
+
+        const deleted = await sql`
+          DELETE FROM farm_messages
+          WHERE id = ${messageId}
+            AND farm_id = ${farm.id}
+          RETURNING id
+        `;
+
+        return json({ ok: true, deleted: deleted[0] });
+      }
+
       // --------------------------------
       // 404
       // --------------------------------
