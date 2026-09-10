@@ -1,4 +1,38 @@
-import { neon } from "@neondatabase/serverless";
+import { neon }import { neon } from "@neondatabase/serverless";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+const NEON_AUTH_URL =
+  "https://ep-lively-breeze-acpy4xfq.neonauth.sa-east-1.aws.neon.tech/neondb/auth";
+
+const NEON_JWKS_URL =
+  `${NEON_AUTH_URL}/.well-known/jwks.json`;
+
+const neonJWKS = createRemoteJWKSet(
+  new URL(NEON_JWKS_URL)
+);
+
+async function verifyAuth(request) {
+  const authorization = request.headers.get("Authorization") || "";
+
+  if (!authorization.startsWith("Bearer ")) {
+    return null;
+  }
+
+  const token = authorization.slice(7).trim();
+
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, neonJWKS);
+
+    return payload;
+  } catch (error) {
+    console.error("JWT verification failed:", error);
+    return null;
+  }
+}
 
 function corsHeaders() {
   return {
