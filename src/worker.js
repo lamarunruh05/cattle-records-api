@@ -97,7 +97,28 @@ export default {
 
         return farms[0] || null;
       }
+// --------------------------------
+// GET /auth-test
+// --------------------------------
+if (pathname === "/auth-test" && request.method === "GET") {
+  const auth = await verifyAuth(request);
 
+  if (!auth) {
+    return json(
+      {
+        ok: false,
+        error: "Not authenticated",
+      },
+      401
+    );
+  }
+
+  return json({
+    ok: true,
+    message: "Authentication verified",
+    user: auth,
+  });
+}
       // --------------------------------
       // GET /
       // --------------------------------
