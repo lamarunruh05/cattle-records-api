@@ -159,6 +159,52 @@ if (pathname.startsWith("/api/")) {
     name: authContext.farmName,
   };
       }
+
+      // --------------------------------
+      // Write a cattle-record activity entry. Chat activity is intentionally excluded.
+      // Logging errors are reported to Cloudflare but do not make a successful
+      // cattle/owner change look like it failed to the user.
+      // --------------------------------
+      async function logActivity({
+        entityType,
+        entityId = null,
+        action,
+        description,
+        details = null,
+      }) {
+        if (!authContext?.farmId || !authContext?.userId) {
+          return;
+        }
+
+        try {
+          const detailsJson = details ? JSON.stringify(details) : null;
+
+          await sql`
+            INSERT INTO activity_log (
+              farm_id,
+              auth_user_id,
+              display_name,
+              entity_type,
+              entity_id,
+              action,
+              description,
+              details
+            )
+            VALUES (
+              ${authContext.farmId},
+              ${authContext.userId},
+              ${authContext.displayName},
+              ${entityType},
+              ${entityId},
+              ${action},
+              ${description},
+              CAST(${detailsJson} AS jsonb)
+            )
+          `;
+        } catch (error) {
+          console.error("Activity log insert failed:", error);
+        }
+      }
       
 // --------------------------------
 // GET /auth-test
@@ -205,6 +251,45 @@ if (pathname === "/auth-test" && request.method === "GET") {
           ok: true,
           database: "connected",
           farm,
+        });
+      }
+
+      // ================================================================
+      // ACTIVITY
+      // ================================================================
+
+      // --------------------------------
+      // GET /api/activity
+      // Cattle-record changes only; chat messages/photos are not logged.
+      // --------------------------------
+      if (pathname === "/api/activity" && request.method === "GET") {
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json({ ok: false, error: "No farm found" }, 404);
+        }
+
+        const activity = await sql`
+          SELECT
+            id,
+            auth_user_id,
+            display_name,
+            entity_type,
+            entity_id,
+            action,
+            description,
+            details,
+            created_at
+          FROM activity_log
+          WHERE farm_id = ${farm.id}
+          ORDER BY created_at DESC, id DESC
+          LIMIT 500
+        `;
+
+        return json({
+          ok: true,
+          count: activity.length,
+          activity,
         });
       }
 
@@ -329,6 +414,14 @@ if (pathname === "/auth-test" && request.method === "GET") {
             created_at
         `;
 
+        await logActivity({
+          entityType: "owner",
+          entityId: ownerId,
+          action: "created",
+          description: `${authContext.displayName} added owner ${name}`,
+          details: { name },
+        });
+
         return json(
           {
             ok: true,
@@ -443,6 +536,19 @@ if (pathname === "/auth-test" && request.method === "GET") {
             created_at
         `;
 
+        if (name !== existingOwner[0].name) {
+          await logActivity({
+            entityType: "owner",
+            entityId: ownerId,
+            action: "updated",
+            description: `${authContext.displayName} renamed owner ${existingOwner[0].name} to ${name}`,
+            details: {
+              before: { name: existingOwner[0].name },
+              after: { name },
+            },
+          });
+        }
+
         return json({
           ok: true,
           owner: updated[0],
@@ -500,6 +606,14 @@ if (pathname === "/auth-test" && request.method === "GET") {
             AND farm_id = ${farm.id}
           RETURNING id, name
         `;
+
+        await logActivity({
+          entityType: "owner",
+          entityId: ownerId,
+          action: "deleted",
+          description: `${authContext.displayName} deleted owner ${existingOwner[0].name}`,
+          details: { name: existingOwner[0].name },
+        });
 
         return json({
           ok: true,
@@ -681,6 +795,18 @@ if (pathname === "/auth-test" && request.method === "GET") {
             updated_at
         `;
 
+        await logActivity({
+          entityType: "cow",
+          entityId: cowId,
+          action: "created",
+          description: `${authContext.displayName} added cow ${brandNumber}`,
+          details: {
+            brand_number: brandNumber,
+            owner_id: ownerId,
+            notes,
+          },
+        });
+
         return json(
           {
             ok: true,
@@ -838,6 +964,41 @@ if (ownerId) {
             updated_at
         `;
 
+        const brandChanged = String(current.brand_number) !== String(brandNumber);
+        const ownerChanged = String(current.owner_id || "") !== String(ownerId || "");
+        const notesChanged = String(current.notes || "") !== String(notes || "");
+
+        if (brandChanged || ownerChanged || notesChanged) {
+          let description;
+
+          if (ownerChanged && !brandChanged && !notesChanged) {
+            description = `${authContext.displayName} changed owner on cow ${brandNumber}`;
+          } else if (brandChanged && !ownerChanged && !notesChanged) {
+            description = `${authContext.displayName} changed cow ${current.brand_number} to ${brandNumber}`;
+          } else {
+            description = `${authContext.displayName} edited cow ${brandNumber}`;
+          }
+
+          await logActivity({
+            entityType: "cow",
+            entityId: cowId,
+            action: "updated",
+            description,
+            details: {
+              before: {
+                brand_number: current.brand_number,
+                owner_id: current.owner_id,
+                notes: current.notes,
+              },
+              after: {
+                brand_number: brandNumber,
+                owner_id: ownerId,
+                notes,
+              },
+            },
+          });
+        }
+
         return json({
           ok: true,
           cow: updated[0],
@@ -878,6 +1039,14 @@ if (ownerId) {
             404
           );
         }
+
+        await logActivity({
+          entityType: "cow",
+          entityId: cowId,
+          action: "deleted",
+          description: `${authContext.displayName} deleted cow ${deleted[0].brand_number}`,
+          details: { brand_number: deleted[0].brand_number },
+        });
 
         return json({
           ok: true,
@@ -1068,7 +1237,7 @@ if (ownerId) {
         }
 
         const cow = await sql`
-          SELECT id
+          SELECT id, brand_number
           FROM cows
           WHERE id = ${cowId}
             AND farm_id = ${farm.id}
@@ -1155,6 +1324,23 @@ if (ownerId) {
             updated_at
         `;
 
+        await logActivity({
+          entityType: "calf",
+          entityId: calfId,
+          action: "created",
+          description: `${authContext.displayName} added calf to cow ${cow[0].brand_number}`,
+          details: {
+            cow_id: cowId,
+            cow_brand_number: cow[0].brand_number,
+            birth_month: birthMonth,
+            birth_year: birthYear,
+            gender,
+            color,
+            is_dead: isDead,
+            notes,
+          },
+        });
+
         return json(
           {
             ok: true,
@@ -1203,7 +1389,8 @@ if (ownerId) {
 
         const existing = await sql`
           SELECT
-            calves.*
+            calves.*,
+            cows.brand_number AS cow_brand_number
           FROM calves
           JOIN cows ON cows.id = calves.cow_id
           WHERE calves.id = ${calfId}
@@ -1326,6 +1513,43 @@ if (ownerId) {
             updated_at
         `;
 
+        const calfChanged =
+          Number(current.birth_month) !== Number(birthMonth) ||
+          Number(current.birth_year) !== Number(birthYear) ||
+          String(current.gender || "") !== String(gender || "") ||
+          String(current.color || "") !== String(color || "") ||
+          Boolean(current.is_dead) !== Boolean(isDead) ||
+          String(current.notes || "") !== String(notes || "");
+
+        if (calfChanged) {
+          await logActivity({
+            entityType: "calf",
+            entityId: calfId,
+            action: "updated",
+            description: `${authContext.displayName} edited calf record for cow ${current.cow_brand_number}`,
+            details: {
+              cow_id: current.cow_id,
+              cow_brand_number: current.cow_brand_number,
+              before: {
+                birth_month: current.birth_month,
+                birth_year: current.birth_year,
+                gender: current.gender,
+                color: current.color,
+                is_dead: current.is_dead,
+                notes: current.notes,
+              },
+              after: {
+                birth_month: birthMonth,
+                birth_year: birthYear,
+                gender,
+                color,
+                is_dead: isDead,
+                notes,
+              },
+            },
+          });
+        }
+
         return json({
           ok: true,
           calf: updated[0],
@@ -1351,7 +1575,10 @@ if (ownerId) {
         }
 
         const existing = await sql`
-          SELECT calves.id
+          SELECT
+            calves.id,
+            calves.cow_id,
+            cows.brand_number AS cow_brand_number
           FROM calves
           JOIN cows ON cows.id = calves.cow_id
           WHERE calves.id = ${calfId}
@@ -1374,6 +1601,17 @@ if (ownerId) {
           WHERE id = ${calfId}
           RETURNING id, cow_id
         `;
+
+        await logActivity({
+          entityType: "calf",
+          entityId: calfId,
+          action: "deleted",
+          description: `${authContext.displayName} deleted calf record from cow ${existing[0].cow_brand_number}`,
+          details: {
+            cow_id: existing[0].cow_id,
+            cow_brand_number: existing[0].cow_brand_number,
+          },
+        });
 
         return json({
           ok: true,
