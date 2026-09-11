@@ -11,5 +11,8 @@
   ],
   "compatibility_flags": [
     "nodejs_compat"
-  ]
+  ],
+  "vars": {
+    "VAPID_PUBLIC_KEY": "BLdIEkXjH1e--uqZN9Ydu0KEJQKLy9PrJ2crMUzInnku53VXBcx9wclWMA3PAhah9qZBcoeZ3oOofkROuHoHAgk"
+  }
 }
