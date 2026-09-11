@@ -70,6 +70,12 @@ function normalizeGender(value) {
   return "__INVALID__";
 }
 
+function createInviteToken() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -206,6 +212,189 @@ if (pathname.startsWith("/api/")) {
         }
       }
       
+// ================================================================
+// FARM INVITES - PUBLIC / PRE-MEMBERSHIP ROUTES
+// ================================================================
+
+// --------------------------------
+// GET /invite-info?token=...
+// Public lookup used by the invite signup screen.
+// --------------------------------
+if (pathname === "/invite-info" && request.method === "GET") {
+  const token = String(url.searchParams.get("token") || "").trim();
+
+  if (!token) {
+    return json({ ok: false, error: "Invite token is required" }, 400);
+  }
+
+  const rows = await sql`
+    SELECT
+      fi.id,
+      fi.role,
+      fi.expires_at,
+      fi.accepted_at,
+      f.name AS farm_name
+    FROM farm_invites fi
+    JOIN farms f
+      ON f.id = fi.farm_id
+    WHERE fi.token = ${token}
+    LIMIT 1
+  `;
+
+  if (!rows.length) {
+    return json({ ok: false, error: "Invite not found" }, 404);
+  }
+
+  const invite = rows[0];
+
+  if (invite.accepted_at) {
+    return json({ ok: false, error: "This invite has already been used" }, 410);
+  }
+
+  if (new Date(invite.expires_at).getTime() <= Date.now()) {
+    return json({ ok: false, error: "This invite has expired" }, 410);
+  }
+
+  return json({
+    ok: true,
+    invite: {
+      farm_name: invite.farm_name,
+      role: invite.role,
+      expires_at: invite.expires_at,
+    },
+  });
+}
+
+// --------------------------------
+// POST /invite-accept
+// Requires a valid Neon Auth JWT, but does not require existing farm access.
+// --------------------------------
+if (pathname === "/invite-accept" && request.method === "POST") {
+  const auth = await verifyAuth(request);
+
+  if (!auth?.sub) {
+    return json({ ok: false, error: "Not authenticated" }, 401);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+
+  const token = String(body.token || "").trim();
+  if (!token) {
+    return json({ ok: false, error: "Invite token is required" }, 400);
+  }
+
+  const inviteRows = await sql`
+    SELECT
+      fi.id,
+      fi.farm_id,
+      fi.role,
+      fi.expires_at,
+      fi.accepted_at,
+      f.name AS farm_name
+    FROM farm_invites fi
+    JOIN farms f
+      ON f.id = fi.farm_id
+    WHERE fi.token = ${token}
+    LIMIT 1
+  `;
+
+  if (!inviteRows.length) {
+    return json({ ok: false, error: "Invite not found" }, 404);
+  }
+
+  const invite = inviteRows[0];
+  if (invite.accepted_at) {
+    return json({ ok: false, error: "This invite has already been used" }, 410);
+  }
+  if (new Date(invite.expires_at).getTime() <= Date.now()) {
+    return json({ ok: false, error: "This invite has expired" }, 410);
+  }
+
+  const userId = String(auth.sub);
+  const existingMembership = await sql`
+    SELECT farm_id
+    FROM farm_members
+    WHERE auth_user_id = ${userId}
+    LIMIT 1
+  `;
+
+  if (existingMembership.length) {
+    if (String(existingMembership[0].farm_id) === String(invite.farm_id)) {
+      return json({
+        ok: true,
+        already_member: true,
+        farm_name: invite.farm_name,
+      });
+    }
+
+    return json(
+      { ok: false, error: "This account already belongs to another farm" },
+      409
+    );
+  }
+
+  const displayName = String(
+    body.display_name || auth.name || auth.email || "User"
+  ).trim().slice(0, 100) || "User";
+
+  const memberId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  const inserted = await sql`
+    WITH claimed AS (
+      UPDATE farm_invites
+      SET
+        accepted_by = ${userId},
+        accepted_at = ${now}
+      WHERE id = ${invite.id}
+        AND accepted_at IS NULL
+        AND expires_at > NOW()
+      RETURNING farm_id, role
+    )
+    INSERT INTO farm_members (
+      id,
+      farm_id,
+      auth_user_id,
+      display_name,
+      role,
+      created_at
+    )
+    SELECT
+      ${memberId},
+      claimed.farm_id,
+      ${userId},
+      ${displayName},
+      claimed.role,
+      ${now}
+    FROM claimed
+    RETURNING
+      id,
+      farm_id,
+      auth_user_id,
+      display_name,
+      role,
+      created_at
+  `;
+
+  if (!inserted.length) {
+    return json({ ok: false, error: "Invite is no longer available" }, 409);
+  }
+
+  return json(
+    {
+      ok: true,
+      farm_name: invite.farm_name,
+      member: inserted[0],
+    },
+    201
+  );
+}
+
 // --------------------------------
 // GET /auth-test
 // --------------------------------
@@ -291,6 +480,282 @@ if (pathname === "/auth-test" && request.method === "GET") {
           count: activity.length,
           activity,
         });
+      }
+
+      // ================================================================
+      // FARM USERS / ADMIN SETTINGS
+      // ================================================================
+
+      // --------------------------------
+      // GET /api/members
+      // Admin only.
+      // --------------------------------
+      if (pathname === "/api/members" && request.method === "GET") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        const members = await sql`
+          SELECT
+            id,
+            auth_user_id,
+            display_name,
+            role,
+            created_at
+          FROM farm_members
+          WHERE farm_id = ${authContext.farmId}
+          ORDER BY
+            CASE WHEN role = 'admin' THEN 0 ELSE 1 END,
+            LOWER(COALESCE(display_name, '')),
+            created_at
+        `;
+
+        return json({
+          ok: true,
+          current_user_id: authContext.userId,
+          members,
+        });
+      }
+
+      // --------------------------------
+      // GET /api/invites
+      // Admin only. Returns pending invite links.
+      // --------------------------------
+      if (pathname === "/api/invites" && request.method === "GET") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        const invites = await sql`
+          SELECT
+            id,
+            token,
+            role,
+            created_by,
+            created_at,
+            expires_at,
+            accepted_by,
+            accepted_at
+          FROM farm_invites
+          WHERE farm_id = ${authContext.farmId}
+            AND accepted_at IS NULL
+          ORDER BY created_at DESC
+          LIMIT 100
+        `;
+
+        return json({ ok: true, invites });
+      }
+
+      // --------------------------------
+      // POST /api/invites
+      // Admin only. Creates a one-use invite, default 7 days.
+      // --------------------------------
+      if (pathname === "/api/invites" && request.method === "POST") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        const role = String(body.role || "member").trim().toLowerCase();
+        if (role !== "member" && role !== "admin") {
+          return json({ ok: false, error: "role must be member or admin" }, 400);
+        }
+
+        const requestedDays = Number(body.expires_days ?? 7);
+        const expiresDays = Number.isFinite(requestedDays)
+          ? Math.max(1, Math.min(30, Math.round(requestedDays)))
+          : 7;
+
+        const token = createInviteToken();
+        const createdAt = new Date();
+        const expiresAt = new Date(
+          createdAt.getTime() + expiresDays * 24 * 60 * 60 * 1000
+        );
+
+        const rows = await sql`
+          INSERT INTO farm_invites (
+            id,
+            farm_id,
+            token,
+            role,
+            created_by,
+            created_at,
+            expires_at
+          )
+          VALUES (
+            ${crypto.randomUUID()},
+            ${authContext.farmId},
+            ${token},
+            ${role},
+            ${authContext.userId},
+            ${createdAt.toISOString()},
+            ${expiresAt.toISOString()}
+          )
+          RETURNING
+            id,
+            token,
+            role,
+            created_at,
+            expires_at
+        `;
+
+        return json(
+          {
+            ok: true,
+            farm_name: authContext.farmName,
+            invite: rows[0],
+          },
+          201
+        );
+      }
+
+      const inviteAdminMatch = pathname.match(/^\/api\/invites\/([^/]+)$/);
+
+      // --------------------------------
+      // DELETE /api/invites/:id
+      // Admin only. Revokes an unused invite.
+      // --------------------------------
+      if (inviteAdminMatch && request.method === "DELETE") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        const inviteId = decodeURIComponent(inviteAdminMatch[1]);
+        const deleted = await sql`
+          DELETE FROM farm_invites
+          WHERE id = ${inviteId}
+            AND farm_id = ${authContext.farmId}
+            AND accepted_at IS NULL
+          RETURNING id
+        `;
+
+        if (!deleted.length) {
+          return json({ ok: false, error: "Invite not found" }, 404);
+        }
+
+        return json({ ok: true, deleted: deleted[0] });
+      }
+
+      const memberMatch = pathname.match(/^\/api\/members\/([^/]+)$/);
+
+      // --------------------------------
+      // PUT /api/members/:id
+      // Admin only. Change member/admin role.
+      // --------------------------------
+      if (memberMatch && request.method === "PUT") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        const memberId = decodeURIComponent(memberMatch[1]);
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        const role = String(body.role || "").trim().toLowerCase();
+        if (role !== "member" && role !== "admin") {
+          return json({ ok: false, error: "role must be member or admin" }, 400);
+        }
+
+        const targetRows = await sql`
+          SELECT id, auth_user_id, display_name, role
+          FROM farm_members
+          WHERE id = ${memberId}
+            AND farm_id = ${authContext.farmId}
+          LIMIT 1
+        `;
+
+        if (!targetRows.length) {
+          return json({ ok: false, error: "Farm user not found" }, 404);
+        }
+
+        const target = targetRows[0];
+        if (String(target.auth_user_id) === String(authContext.userId) && role !== "admin") {
+          return json(
+            { ok: false, error: "You cannot demote your own admin account" },
+            400
+          );
+        }
+
+        if (target.role === "admin" && role !== "admin") {
+          const counts = await sql`
+            SELECT COUNT(*)::int AS count
+            FROM farm_members
+            WHERE farm_id = ${authContext.farmId}
+              AND role = 'admin'
+          `;
+          if (Number(counts[0]?.count || 0) <= 1) {
+            return json({ ok: false, error: "The farm must keep at least one admin" }, 409);
+          }
+        }
+
+        const updated = await sql`
+          UPDATE farm_members
+          SET role = ${role}
+          WHERE id = ${memberId}
+            AND farm_id = ${authContext.farmId}
+          RETURNING id, auth_user_id, display_name, role, created_at
+        `;
+
+        return json({ ok: true, member: updated[0] });
+      }
+
+      // --------------------------------
+      // DELETE /api/members/:id
+      // Admin only. Removes farm access, but does not delete their auth account.
+      // --------------------------------
+      if (memberMatch && request.method === "DELETE") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        const memberId = decodeURIComponent(memberMatch[1]);
+        const targetRows = await sql`
+          SELECT id, auth_user_id, display_name, role
+          FROM farm_members
+          WHERE id = ${memberId}
+            AND farm_id = ${authContext.farmId}
+          LIMIT 1
+        `;
+
+        if (!targetRows.length) {
+          return json({ ok: false, error: "Farm user not found" }, 404);
+        }
+
+        const target = targetRows[0];
+        if (String(target.auth_user_id) === String(authContext.userId)) {
+          return json({ ok: false, error: "You cannot remove your own account" }, 400);
+        }
+
+        if (target.role === "admin") {
+          const counts = await sql`
+            SELECT COUNT(*)::int AS count
+            FROM farm_members
+            WHERE farm_id = ${authContext.farmId}
+              AND role = 'admin'
+          `;
+          if (Number(counts[0]?.count || 0) <= 1) {
+            return json({ ok: false, error: "The farm must keep at least one admin" }, 409);
+          }
+        }
+
+        const deleted = await sql`
+          DELETE FROM farm_members
+          WHERE id = ${memberId}
+            AND farm_id = ${authContext.farmId}
+          RETURNING id, auth_user_id, display_name, role
+        `;
+
+        return json({ ok: true, deleted: deleted[0] });
       }
 
       // ================================================================
