@@ -1465,6 +1465,165 @@ if (ownerId) {
         return json({ ok: true, message: inserted[0] }, 201);
       }
 
+      // --------------------------------
+      // POST /api/messages/photo
+      // Stores the image privately in R2, then creates the shared chat message.
+      // --------------------------------
+      if (pathname === "/api/messages/photo" && request.method === "POST") {
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json({ ok: false, error: "No farm found" }, 404);
+        }
+
+        if (!env.PHOTOS) {
+          return json({ ok: false, error: "Photo storage is not configured" }, 500);
+        }
+
+        const formData = await request.formData();
+        const photo = formData.get("photo");
+        const captionValue = formData.get("message_text");
+        const messageText =
+          captionValue === null || captionValue === undefined
+            ? null
+            : String(captionValue).trim() || null;
+
+        if (!photo || typeof photo.arrayBuffer !== "function") {
+          return json({ ok: false, error: "Photo is required" }, 400);
+        }
+
+        if (messageText && messageText.length > 5000) {
+          return json({ ok: false, error: "Message is too long" }, 400);
+        }
+
+        const allowedTypes = new Set([
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+        ]);
+        const contentType = String(photo.type || "").toLowerCase();
+
+        if (!allowedTypes.has(contentType)) {
+          return json(
+            { ok: false, error: "Photo must be JPEG, PNG, or WebP" },
+            400
+          );
+        }
+
+        const maxPhotoBytes = 8 * 1024 * 1024;
+        if (Number(photo.size || 0) <= 0 || Number(photo.size) > maxPhotoBytes) {
+          return json(
+            { ok: false, error: "Photo must be 8 MB or smaller" },
+            400
+          );
+        }
+
+        const extension =
+          contentType === "image/png"
+            ? "png"
+            : contentType === "image/webp"
+              ? "webp"
+              : "jpg";
+
+        const objectKey = `${farm.id}/${crypto.randomUUID()}.${extension}`;
+        const bytes = await photo.arrayBuffer();
+
+        await env.PHOTOS.put(objectKey, bytes, {
+          httpMetadata: {
+            contentType,
+            cacheControl: "private, max-age=86400",
+          },
+          customMetadata: {
+            farmId: String(farm.id),
+            uploadedBy: String(authContext.userId),
+          },
+        });
+
+        try {
+          const inserted = await sql`
+            INSERT INTO farm_messages (
+              farm_id,
+              auth_user_id,
+              display_name,
+              message_text,
+              photo_url
+            )
+            VALUES (
+              ${farm.id},
+              ${authContext.userId},
+              ${authContext.displayName},
+              ${messageText},
+              ${objectKey}
+            )
+            RETURNING
+              id,
+              auth_user_id,
+              display_name,
+              message_text,
+              photo_url,
+              created_at
+          `;
+
+          return json({ ok: true, message: inserted[0] }, 201);
+        } catch (error) {
+          // Avoid leaving an orphaned R2 object if the database insert fails.
+          try {
+            await env.PHOTOS.delete(objectKey);
+          } catch (cleanupError) {
+            console.error("R2 cleanup failed:", cleanupError);
+          }
+          throw error;
+        }
+      }
+
+      // --------------------------------
+      // GET /api/media/:messageId
+      // Streams a private R2 photo only when it belongs to this user's farm.
+      // --------------------------------
+      const mediaMatch = pathname.match(/^\/api\/media\/([^/]+)$/);
+
+      if (mediaMatch && request.method === "GET") {
+        const messageId = decodeURIComponent(mediaMatch[1]);
+        const farm = await getFarm();
+
+        if (!farm) {
+          return json({ ok: false, error: "No farm found" }, 404);
+        }
+
+        if (!env.PHOTOS) {
+          return json({ ok: false, error: "Photo storage is not configured" }, 500);
+        }
+
+        const rows = await sql`
+          SELECT id, photo_url
+          FROM farm_messages
+          WHERE id = ${messageId}
+            AND farm_id = ${farm.id}
+            AND photo_url IS NOT NULL
+          LIMIT 1
+        `;
+
+        if (!rows.length) {
+          return json({ ok: false, error: "Photo not found" }, 404);
+        }
+
+        const object = await env.PHOTOS.get(rows[0].photo_url);
+
+        if (!object) {
+          return json({ ok: false, error: "Photo not found" }, 404);
+        }
+
+        const headers = new Headers(corsHeaders());
+        object.writeHttpMetadata(headers);
+        headers.set("Cache-Control", "private, max-age=86400");
+        headers.set("X-Content-Type-Options", "nosniff");
+
+        return new Response(object.body, {
+          status: 200,
+          headers,
+        });
+      }
+
       // Match /api/messages/:id
       const messageMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
 
@@ -1481,7 +1640,7 @@ if (ownerId) {
         }
 
         const existing = await sql`
-          SELECT id, auth_user_id
+          SELECT id, auth_user_id, photo_url
           FROM farm_messages
           WHERE id = ${messageId}
             AND farm_id = ${farm.id}
@@ -1506,6 +1665,16 @@ if (ownerId) {
             AND farm_id = ${farm.id}
           RETURNING id
         `;
+
+        if (existing[0].photo_url && env.PHOTOS) {
+          try {
+            await env.PHOTOS.delete(existing[0].photo_url);
+          } catch (error) {
+            // The message is already deleted from Neon. Log an orphan cleanup issue
+            // rather than making the user think the delete failed.
+            console.error("R2 photo delete failed:", error);
+          }
+        }
 
         return json({ ok: true, deleted: deleted[0] });
       }
