@@ -1,5 +1,6 @@
 import { neon } from "@neondatabase/serverless";
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import webpush from "web-push";
 
 const NEON_AUTH_URL =
   "https://ep-lively-breeze-acpy4xfq.neonauth.sa-east-1.aws.neon.tech/neondb/auth";
@@ -77,7 +78,7 @@ function createInviteToken() {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -209,6 +210,94 @@ if (pathname.startsWith("/api/")) {
           `;
         } catch (error) {
           console.error("Activity log insert failed:", error);
+        }
+      }
+
+      // --------------------------------
+      // Send a Farm Chat push notification to every subscribed device
+      // in this farm except devices belonging to the sender. Dead
+      // browser subscriptions are removed automatically.
+      // --------------------------------
+      async function sendFarmChatPush({ messageId, messageText = null, isPhoto = false }) {
+        if (!env.VAPID_PUBLIC_KEY || !env.VAPID_PRIVATE_KEY) {
+          console.error("Push notification keys are not configured");
+          return;
+        }
+
+        const subscriptions = await sql`
+          SELECT id, endpoint, p256dh, auth_key
+          FROM push_subscriptions
+          WHERE farm_id = ${authContext.farmId}
+            AND auth_user_id <> ${authContext.userId}
+        `;
+
+        if (!subscriptions.length) {
+          return;
+        }
+
+        webpush.setVapidDetails(
+          "https://lamarunruh05.github.io/cattle-records/",
+          env.VAPID_PUBLIC_KEY,
+          env.VAPID_PRIVATE_KEY
+        );
+
+        const cleanText = String(messageText || "").trim();
+        const body = isPhoto
+          ? (cleanText ? `Photo: ${cleanText}` : "Sent a photo")
+          : cleanText;
+
+        const payload = JSON.stringify({
+          title: `${authContext.displayName} · Farm Chat`,
+          body: body.length > 180 ? `${body.slice(0, 177)}...` : body,
+          tag: `farm-chat-${messageId}`,
+          data: {
+            url: "/cattle-records/?open=chat",
+            messageId,
+          },
+        });
+
+        const deadEndpoints = [];
+
+        await Promise.all(
+          subscriptions.map(async (row) => {
+            const subscription = {
+              endpoint: row.endpoint,
+              keys: {
+                p256dh: row.p256dh,
+                auth: row.auth_key,
+              },
+            };
+
+            try {
+              await webpush.sendNotification(subscription, payload);
+            } catch (error) {
+              const statusCode = Number(error?.statusCode || 0);
+              if (statusCode === 404 || statusCode === 410) {
+                deadEndpoints.push(row.endpoint);
+              } else {
+                console.error("Push notification failed:", error);
+              }
+            }
+          })
+        );
+
+        if (deadEndpoints.length) {
+          await Promise.all(
+            deadEndpoints.map((endpoint) => sql`
+              DELETE FROM push_subscriptions
+              WHERE endpoint = ${endpoint}
+            `)
+          );
+        }
+      }
+
+      function queueFarmChatPush(payload) {
+        const task = sendFarmChatPush(payload).catch((error) => {
+          console.error("Farm Chat push task failed:", error);
+        });
+
+        if (ctx && typeof ctx.waitUntil === "function") {
+          ctx.waitUntil(task);
         }
       }
       
@@ -2085,6 +2174,102 @@ if (ownerId) {
       }
 
       // ================================================================
+      // PUSH NOTIFICATIONS
+      // ================================================================
+
+      // --------------------------------
+      // GET /api/push/public-key
+      // The VAPID public key is safe to expose to authenticated clients.
+      // --------------------------------
+      if (pathname === "/api/push/public-key" && request.method === "GET") {
+        if (!env.VAPID_PUBLIC_KEY) {
+          return json({ ok: false, error: "Push notifications are not configured" }, 500);
+        }
+
+        return json({
+          ok: true,
+          public_key: env.VAPID_PUBLIC_KEY,
+        });
+      }
+
+      // --------------------------------
+      // POST /api/push/subscribe
+      // Stores or refreshes this browser/device subscription.
+      // --------------------------------
+      if (pathname === "/api/push/subscribe" && request.method === "POST") {
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        const subscription = body?.subscription || body;
+        const endpoint = String(subscription?.endpoint || "").trim();
+        const p256dh = String(subscription?.keys?.p256dh || "").trim();
+        const authKey = String(subscription?.keys?.auth || "").trim();
+
+        if (!endpoint || !p256dh || !authKey) {
+          return json({ ok: false, error: "Invalid push subscription" }, 400);
+        }
+
+        await sql`
+          INSERT INTO push_subscriptions (
+            farm_id,
+            auth_user_id,
+            endpoint,
+            p256dh,
+            auth_key,
+            updated_at
+          )
+          VALUES (
+            ${authContext.farmId},
+            ${authContext.userId},
+            ${endpoint},
+            ${p256dh},
+            ${authKey},
+            now()
+          )
+          ON CONFLICT (endpoint)
+          DO UPDATE SET
+            farm_id = EXCLUDED.farm_id,
+            auth_user_id = EXCLUDED.auth_user_id,
+            p256dh = EXCLUDED.p256dh,
+            auth_key = EXCLUDED.auth_key,
+            updated_at = now()
+        `;
+
+        return json({ ok: true });
+      }
+
+      // --------------------------------
+      // DELETE /api/push/subscribe
+      // Removes this user's browser/device subscription.
+      // --------------------------------
+      if (pathname === "/api/push/subscribe" && request.method === "DELETE") {
+        let endpoint = "";
+        try {
+          const body = await request.json();
+          endpoint = String(body?.endpoint || "").trim();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        if (!endpoint) {
+          return json({ ok: false, error: "Push endpoint is required" }, 400);
+        }
+
+        await sql`
+          DELETE FROM push_subscriptions
+          WHERE endpoint = ${endpoint}
+            AND farm_id = ${authContext.farmId}
+            AND auth_user_id = ${authContext.userId}
+        `;
+
+        return json({ ok: true });
+      }
+
+      // ================================================================
       // FARM CHAT
       // ================================================================
 
@@ -2164,6 +2349,12 @@ if (ownerId) {
             photo_url,
             created_at
         `;
+
+        queueFarmChatPush({
+          messageId: inserted[0].id,
+          messageText: inserted[0].message_text,
+          isPhoto: false,
+        });
 
         return json({ ok: true, message: inserted[0] }, 201);
       }
@@ -2266,6 +2457,12 @@ if (ownerId) {
               photo_url,
               created_at
           `;
+
+          queueFarmChatPush({
+            messageId: inserted[0].id,
+            messageText: inserted[0].message_text,
+            isPhoto: true,
+          });
 
           return json({ ok: true, message: inserted[0] }, 201);
         } catch (error) {
