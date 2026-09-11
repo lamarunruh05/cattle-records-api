@@ -8,5 +8,8 @@
       "binding": "PHOTOS",
       "bucket_name": "cattle-records-photos"
     }
+  ],
+  "compatibility_flags": [
+    "nodejs_compat"
   ]
 }
