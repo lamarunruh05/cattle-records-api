@@ -571,6 +571,122 @@ if (pathname === "/auth-test" && request.method === "GET") {
         });
       }
 
+      // --------------------------------
+      // DELETE /api/activity/:id
+      // Admin only. Deletes one activity entry from this farm.
+      // --------------------------------
+      if (
+        pathname.startsWith("/api/activity/") &&
+        request.method === "DELETE"
+      ) {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        const activityId = pathname.slice("/api/activity/".length).trim();
+
+        if (!activityId) {
+          return json({ ok: false, error: "Activity id is required" }, 400);
+        }
+
+        const deleted = await sql`
+          DELETE FROM activity_log
+          WHERE id = ${activityId}
+            AND farm_id = ${authContext.farmId}
+          RETURNING id
+        `;
+
+        if (!deleted.length) {
+          return json({ ok: false, error: "Activity entry not found" }, 404);
+        }
+
+        return json({ ok: true, deleted: 1 });
+      }
+
+      // --------------------------------
+      // POST /api/activity/clear
+      // Admin only. Supports:
+      //   { mode: "all" }
+      //   { mode: "older_than_days", days: 30 }
+      //   { mode: "before_date", before_date: "2026-09-01" }
+      // --------------------------------
+      if (pathname === "/api/activity/clear" && request.method === "POST") {
+        if (authContext.role !== "admin") {
+          return json({ ok: false, error: "Admin access required" }, 403);
+        }
+
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        const mode = String(body?.mode || "").trim();
+        let deleted = [];
+
+        if (mode === "all") {
+          deleted = await sql`
+            DELETE FROM activity_log
+            WHERE farm_id = ${authContext.farmId}
+            RETURNING id
+          `;
+        } else if (mode === "older_than_days") {
+          const days = Number(body?.days);
+
+          if (!Number.isInteger(days) || days < 1 || days > 3650) {
+            return json(
+              { ok: false, error: "Days must be a whole number from 1 to 3650" },
+              400
+            );
+          }
+
+          const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+          deleted = await sql`
+            DELETE FROM activity_log
+            WHERE farm_id = ${authContext.farmId}
+              AND created_at < ${cutoff}
+            RETURNING id
+          `;
+        } else if (mode === "before_date") {
+          const rawDate = String(body?.before_date || "").trim();
+
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+            return json(
+              { ok: false, error: "before_date must use YYYY-MM-DD" },
+              400
+            );
+          }
+
+          const cutoffDate = new Date(`${rawDate}T00:00:00.000Z`);
+
+          if (Number.isNaN(cutoffDate.getTime())) {
+            return json({ ok: false, error: "Invalid before_date" }, 400);
+          }
+
+          deleted = await sql`
+            DELETE FROM activity_log
+            WHERE farm_id = ${authContext.farmId}
+              AND created_at < ${cutoffDate.toISOString()}
+            RETURNING id
+          `;
+        } else {
+          return json(
+            {
+              ok: false,
+              error: "Mode must be all, older_than_days, or before_date",
+            },
+            400
+          );
+        }
+
+        return json({
+          ok: true,
+          deleted: deleted.length,
+        });
+      }
+
       // ================================================================
       // FARM USERS / ADMIN SETTINGS
       // ================================================================
