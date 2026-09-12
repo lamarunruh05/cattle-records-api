@@ -300,6 +300,323 @@ if (pathname.startsWith("/api/")) {
           ctx.waitUntil(task);
         }
       }
+
+      // --------------------------------
+      // Shared cow lists (for example: "Cull cows 2026").
+      // Tables are created lazily the first time a list route is used so this
+      // feature can be deployed without a separate SQL migration step.
+      // --------------------------------
+      async function ensureCowListTables() {
+        await sql`
+          CREATE TABLE IF NOT EXISTS cow_lists (
+            id UUID PRIMARY KEY,
+            farm_id UUID NOT NULL REFERENCES farms(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            created_by TEXT,
+            created_by_name TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )
+        `;
+
+        await sql`
+          CREATE UNIQUE INDEX IF NOT EXISTS cow_lists_farm_name_unique
+          ON cow_lists (farm_id, LOWER(name))
+        `;
+
+        await sql`
+          CREATE TABLE IF NOT EXISTS cow_list_items (
+            list_id UUID NOT NULL REFERENCES cow_lists(id) ON DELETE CASCADE,
+            cow_id UUID NOT NULL REFERENCES cows(id) ON DELETE CASCADE,
+            added_by TEXT,
+            added_by_name TEXT,
+            added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (list_id, cow_id)
+          )
+        `;
+      }
+
+      async function getListForCurrentFarm(listId) {
+        const rows = await sql`
+          SELECT id, farm_id, name, created_by, created_by_name, created_at, updated_at
+          FROM cow_lists
+          WHERE id = ${listId}
+            AND farm_id = ${authContext.farmId}
+          LIMIT 1
+        `;
+        return rows[0] || null;
+      }
+
+      // ================================================================
+      // COW LISTS
+      // Shared by every user who belongs to this farm.
+      // ================================================================
+
+      // GET /api/lists
+      // Returns all farm lists plus the cow IDs/brand numbers in each list.
+      if (pathname === "/api/lists" && request.method === "GET") {
+        await ensureCowListTables();
+
+        const lists = await sql`
+          SELECT id, name, created_by, created_by_name, created_at, updated_at
+          FROM cow_lists
+          WHERE farm_id = ${authContext.farmId}
+          ORDER BY LOWER(name), name
+        `;
+
+        const items = await sql`
+          SELECT
+            cli.list_id,
+            cli.cow_id,
+            cli.added_by,
+            cli.added_by_name,
+            cli.added_at,
+            c.brand_number
+          FROM cow_list_items cli
+          JOIN cow_lists cl ON cl.id = cli.list_id
+          JOIN cows c ON c.id = cli.cow_id
+          WHERE cl.farm_id = ${authContext.farmId}
+          ORDER BY LOWER(c.brand_number), c.brand_number
+        `;
+
+        const byList = new Map();
+        for (const item of items) {
+          if (!byList.has(item.list_id)) byList.set(item.list_id, []);
+          byList.get(item.list_id).push({
+            cow_id: item.cow_id,
+            brand_number: item.brand_number,
+            added_by: item.added_by,
+            added_by_name: item.added_by_name,
+            added_at: item.added_at,
+          });
+        }
+
+        return json({
+          ok: true,
+          count: lists.length,
+          lists: lists.map((list) => ({
+            ...list,
+            cows: byList.get(list.id) || [],
+            cow_count: (byList.get(list.id) || []).length,
+          })),
+        });
+      }
+
+      // POST /api/lists
+      // body: { name }
+      if (pathname === "/api/lists" && request.method === "POST") {
+        await ensureCowListTables();
+
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+
+        const name = String(body.name || "").trim().slice(0, 100);
+        if (!name) return json({ ok: false, error: "List name is required" }, 400);
+
+        const existing = await sql`
+          SELECT id
+          FROM cow_lists
+          WHERE farm_id = ${authContext.farmId}
+            AND LOWER(name) = LOWER(${name})
+          LIMIT 1
+        `;
+        if (existing.length) {
+          return json({ ok: false, error: "A list with that name already exists" }, 409);
+        }
+
+        const id = crypto.randomUUID();
+        const inserted = await sql`
+          INSERT INTO cow_lists (
+            id, farm_id, name, created_by, created_by_name
+          ) VALUES (
+            ${id}, ${authContext.farmId}, ${name},
+            ${authContext.userId}, ${authContext.displayName}
+          )
+          RETURNING id, name, created_by, created_by_name, created_at, updated_at
+        `;
+
+        await logActivity({
+          entityType: "list",
+          entityId: id,
+          action: "create",
+          description: `Created cow list ${name}`,
+          details: { list_name: name },
+        });
+
+        return json({ ok: true, list: { ...inserted[0], cows: [], cow_count: 0 } }, 201);
+      }
+
+      const listMatch = pathname.match(/^\/api\/lists\/([^/]+)$/);
+
+      // PUT /api/lists/:id
+      // body: { name }
+      if (listMatch && request.method === "PUT") {
+        await ensureCowListTables();
+        const listId = decodeURIComponent(listMatch[1]);
+        const list = await getListForCurrentFarm(listId);
+        if (!list) return json({ ok: false, error: "List not found" }, 404);
+
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+        const name = String(body.name || "").trim().slice(0, 100);
+        if (!name) return json({ ok: false, error: "List name is required" }, 400);
+
+        const duplicate = await sql`
+          SELECT id
+          FROM cow_lists
+          WHERE farm_id = ${authContext.farmId}
+            AND id <> ${listId}
+            AND LOWER(name) = LOWER(${name})
+          LIMIT 1
+        `;
+        if (duplicate.length) {
+          return json({ ok: false, error: "A list with that name already exists" }, 409);
+        }
+
+        const updated = await sql`
+          UPDATE cow_lists
+          SET name = ${name}, updated_at = NOW()
+          WHERE id = ${listId}
+            AND farm_id = ${authContext.farmId}
+          RETURNING id, name, created_by, created_by_name, created_at, updated_at
+        `;
+
+        await logActivity({
+          entityType: "list",
+          entityId: listId,
+          action: "update",
+          description: `Renamed cow list ${list.name} to ${name}`,
+          details: { old_name: list.name, list_name: name },
+        });
+
+        return json({ ok: true, list: updated[0] });
+      }
+
+      // DELETE /api/lists/:id
+      if (listMatch && request.method === "DELETE") {
+        await ensureCowListTables();
+        const listId = decodeURIComponent(listMatch[1]);
+        const list = await getListForCurrentFarm(listId);
+        if (!list) return json({ ok: false, error: "List not found" }, 404);
+
+        await sql`
+          DELETE FROM cow_lists
+          WHERE id = ${listId}
+            AND farm_id = ${authContext.farmId}
+        `;
+
+        await logActivity({
+          entityType: "list",
+          entityId: listId,
+          action: "delete",
+          description: `Deleted cow list ${list.name}`,
+          details: { list_name: list.name },
+        });
+
+        return json({ ok: true, deleted: { id: listId, name: list.name } });
+      }
+
+      const listCowMatch = pathname.match(/^\/api\/lists\/([^/]+)\/cows(?:\/([^/]+))?$/);
+
+      // POST /api/lists/:id/cows
+      // body: { cow_id }
+      if (listCowMatch && !listCowMatch[2] && request.method === "POST") {
+        await ensureCowListTables();
+        const listId = decodeURIComponent(listCowMatch[1]);
+        const list = await getListForCurrentFarm(listId);
+        if (!list) return json({ ok: false, error: "List not found" }, 404);
+
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "Invalid JSON body" }, 400);
+        }
+        const cowId = String(body.cow_id || "").trim();
+        if (!cowId) return json({ ok: false, error: "cow_id is required" }, 400);
+
+        const cows = await sql`
+          SELECT id, brand_number
+          FROM cows
+          WHERE id = ${cowId}
+            AND farm_id = ${authContext.farmId}
+          LIMIT 1
+        `;
+        if (!cows.length) return json({ ok: false, error: "Cow not found" }, 404);
+
+        const inserted = await sql`
+          INSERT INTO cow_list_items (
+            list_id, cow_id, added_by, added_by_name
+          ) VALUES (
+            ${listId}, ${cowId}, ${authContext.userId}, ${authContext.displayName}
+          )
+          ON CONFLICT (list_id, cow_id) DO NOTHING
+          RETURNING list_id, cow_id, added_by, added_by_name, added_at
+        `;
+
+        if (inserted.length) {
+          await sql`
+            UPDATE cow_lists SET updated_at = NOW()
+            WHERE id = ${listId}
+          `;
+          await logActivity({
+            entityType: "list",
+            entityId: listId,
+            action: "add_cow",
+            description: `Added cow ${cows[0].brand_number} to ${list.name}`,
+            details: { list_name: list.name, cow_id: cowId, cow_brand_number: cows[0].brand_number },
+          });
+        }
+
+        return json({
+          ok: true,
+          already_in_list: inserted.length === 0,
+          item: inserted[0] || { list_id: listId, cow_id: cowId },
+        });
+      }
+
+      // DELETE /api/lists/:id/cows/:cowId
+      if (listCowMatch && listCowMatch[2] && request.method === "DELETE") {
+        await ensureCowListTables();
+        const listId = decodeURIComponent(listCowMatch[1]);
+        const cowId = decodeURIComponent(listCowMatch[2]);
+        const list = await getListForCurrentFarm(listId);
+        if (!list) return json({ ok: false, error: "List not found" }, 404);
+
+        const cowRows = await sql`
+          SELECT brand_number FROM cows
+          WHERE id = ${cowId} AND farm_id = ${authContext.farmId}
+          LIMIT 1
+        `;
+
+        const removed = await sql`
+          DELETE FROM cow_list_items
+          WHERE list_id = ${listId}
+            AND cow_id = ${cowId}
+          RETURNING cow_id
+        `;
+
+        if (removed.length) {
+          await sql`UPDATE cow_lists SET updated_at = NOW() WHERE id = ${listId}`;
+          await logActivity({
+            entityType: "list",
+            entityId: listId,
+            action: "remove_cow",
+            description: `Removed cow ${cowRows[0]?.brand_number || cowId} from ${list.name}`,
+            details: { list_name: list.name, cow_id: cowId, cow_brand_number: cowRows[0]?.brand_number || null },
+          });
+        }
+
+        return json({ ok: true, removed: removed.length > 0 });
+      }
       
 // ================================================================
 // FARM INVITES - PUBLIC / PRE-MEMBERSHIP ROUTES
